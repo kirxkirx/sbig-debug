@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Package tested executables and publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sbig-debug-win*.exe
+          merge-multiple: true
+          path: dist
+      - name: Package executables, documentation and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/sbig-debug-win64.exe
+          test -s dist/sbig-debug-win32.exe
+          mkdir -p dist/package
+          cp dist/sbig-debug-win64.exe dist/sbig-debug-win32.exe README.md LICENSE dist/package/
+          cp -R docs dist/package/docs
+          (
+            cd dist/package
+            sha256sum sbig-debug-win64.exe sbig-debug-win32.exe > SHA256SUMS.txt
+            zip -r ../sbig-debug-windows.zip .
+          )
+          (
+            cd dist
+            sha256sum sbig-debug-win64.exe sbig-debug-win32.exe sbig-debug-windows.zip > SHA256SUMS.txt
+          )
+          cat > dist/release-notes.md <<'EOF'
+          Download `sbig-debug-windows.zip` for both Windows executables, instructions, and diagnostic reference notes, or download an individual executable.
+
+          Choose `sbig-debug-win64.exe` for a 64-bit SBIG Universal Driver DLL and `sbig-debug-win32.exe` for a 32-bit DLL. The camera manufacturer's driver must already be installed; it is not included in this download.
+
+          Close other camera applications before connecting. Run `--demo --no-pause` to try the image analysis and report without a camera. See the bundled README for camera acquisition and controlled driver-setting comparisons.
+
+          Both executables were built and smoke-tested on Windows by GitHub Actions. Automated tests use simulated data; camera hardware validation remains necessary. SHA256 checksums are included.
+          EOF
+      - name: Publish release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "SBIG Debug $RELEASE_TAG" --notes-file dist/release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" dist/sbig-debug-win64.exe dist/sbig-debug-win32.exe dist/sbig-debug-windows.zip dist/SHA256SUMS.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false
+

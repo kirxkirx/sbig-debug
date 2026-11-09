@@ -1,0 +1,19 @@
+# Build products and diagnostic data stay local.
+/sbig-debug
+/dist/
+*.exe
+*.test
+*.fits
+*.fit
+*.fts
+/diagnostics/
+/sbig-debug-*/
+/demo-output/
+/coverage.out
+# SBIG's proprietary driver is supplied by the user's installation.
+*.dll
+*.lib
+*.pdb
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,113 @@
+name: Test and build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Test and vet
+        run: |
+          go test ./...
+          go vet ./...
+
+  windows:
+    name: Windows ${{ matrix.goarch }} tests and executable
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            binary: sbig-debug-win64.exe
+          - goarch: '386'
+            binary: sbig-debug-win32.exe
+    env:
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '0'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Test and vet on Windows
+        run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Go tests failed' }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Go vet failed' }
+      - name: Build standalone executable
+        env:
+          BUILD_REF_TYPE: ${{ github.ref_type }}
+          BUILD_REF_NAME: ${{ github.ref_name }}
+          BUILD_COMMIT: ${{ github.sha }}
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          $version = 'dev-' + $env:BUILD_COMMIT.Substring(0, 12)
+          if ($env:BUILD_REF_TYPE -eq 'tag') { $version = $env:BUILD_REF_NAME }
+          if ($version -notmatch '^[A-Za-z0-9._+-]+$') { throw 'Invalid build version' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -ldflags "-s -w -X main.version=$version" -o "dist/$env:BINARY_NAME" .
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Smoke-test the executable without camera hardware
+        env:
+          BINARY_NAME: ${{ matrix.binary }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $exe = Join-Path $PWD "dist/$env:BINARY_NAME"
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Version command failed' }
+          $demo = Join-Path $env:RUNNER_TEMP 'sbig-debug-demo'
+          & $exe --demo --out $demo --no-pause
+          if ($LASTEXITCODE -ne 0) { throw 'Demo acquisition failed' }
+          $fits = @(Get-ChildItem $demo -Recurse -Filter '*.fits')
+          $reports = @(Get-ChildItem $demo -Recurse -Filter 'report.html')
+          if ($fits.Count -eq 0 -or $reports.Count -eq 0) { throw 'Demo did not produce FITS images and report.html' }
+          $missingName = 'SBIG-missing-&-' + [guid]::NewGuid().ToString('N') + '.dll'
+          $missingDLL = Join-Path $env:RUNNER_TEMP $missingName
+          $failure = Join-Path $env:RUNNER_TEMP ('sbig-debug-failure-' + [guid]::NewGuid().ToString('N'))
+          if (Test-Path $missingDLL) { throw 'Missing-DLL test path already exists' }
+          & $exe --dll $missingDLL --action info --out $failure --no-pause
+          if ($LASTEXITCODE -eq 0) { throw 'Missing driver incorrectly succeeded' }
+          $failureReport = Join-Path $failure 'report.html'
+          if (-not (Test-Path $failureReport)) { throw 'Driver load failure did not produce report.html' }
+          $html = Get-Content $failureReport -Raw
+          if (-not $html.Contains($missingName.Replace('&', '&amp;'))) { throw 'HTML report lost or failed to escape the DLL error' }
+          $json = Get-Content (Join-Path $failure 'report.json') -Raw | ConvertFrom-Json
+          if (@($json.errors).Count -eq 0) { throw 'Driver load failure is absent from report.json' }
+          & $exe --this-option-must-not-exist --no-pause
+          if ($LASTEXITCODE -eq 0) { throw 'Unknown option incorrectly succeeded' }
+          # Clear the intentional nonzero exit before the runner checks this step.
+          $global:LASTEXITCODE = 0
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 30
+
