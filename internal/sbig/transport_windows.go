@@ -90,6 +90,7 @@ func loadTransport(requested string) (transport, error) {
 			actual = syscall.UTF16ToString(b[:n])
 		}
 		info := map[string]any{"path": actual, "requested_path": requested, "process_architecture": runtime.GOARCH, "file_version": fileVersion(actual, system)}
+		info["windows_version"] = windowsVersion(system)
 		if f, e := os.Open(actual); e == nil {
 			h := sha256.New()
 			_, e = io.Copy(h, f)
@@ -110,16 +111,36 @@ func loadTransport(requested string) (transport, error) {
 	return nil, fmt.Errorf("could not load the SBIG Universal Driver; install SBIG Driver Checker, or supply an absolute --dll path matching this %s executable: %w", runtime.GOARCH, errors.Join(attempts...))
 }
 
-func bytePointer(b []byte) uintptr {
-	if len(b) == 0 {
-		return 0
+func windowsVersion(system string) any {
+	dll, e := loadDLLAbsolute(filepath.Join(system, "ntdll.dll"))
+	if e != nil {
+		return "unavailable: " + e.Error()
 	}
-	return uintptr(unsafe.Pointer(&b[0]))
+	defer dll.Release()
+	proc, e := dll.FindProc("RtlGetVersion")
+	if e != nil {
+		return "unavailable: " + e.Error()
+	}
+	// RTL_OSVERSIONINFOW: five DWORDs followed by 128 UTF-16 code units.
+	b := make([]byte, 276)
+	put32(b, 0, 276)
+	status, _, _ := proc.Call(uintptr(unsafe.Pointer(&b[0])))
+	if int32(status) != 0 {
+		return fmt.Sprintf("unavailable: NTSTATUS 0x%x", status)
+	}
+	return map[string]any{"major": u32(b, 4), "minor": u32(b, 8), "build": u32(b, 12), "platform_id": u32(b, 16)}
+}
+
+func bytePointer(b []byte) *byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return &b[0]
 }
 func (t *windowsTransport) call(command uint16, p, r []byte) int16 {
 	// The SDK returns a signed 16-bit status. GetLastError is unrelated to its
 	// status, so the third return from Proc.Call is intentionally ignored.
-	status, _, _ := t.proc.Call(uintptr(command), bytePointer(p), bytePointer(r))
+	status, _, _ := t.proc.Call(uintptr(command), uintptr(unsafe.Pointer(bytePointer(p))), uintptr(unsafe.Pointer(bytePointer(r))))
 	runtime.KeepAlive(p)
 	runtime.KeepAlive(r)
 	return int16(status)
@@ -155,14 +176,14 @@ func fileVersion(path, system string) string {
 		return "unavailable"
 	}
 	b := make([]byte, n)
-	ok, _, _ := getInfo.Call(uintptr(unsafe.Pointer(p)), 0, n, bytePointer(b))
+	ok, _, _ := getInfo.Call(uintptr(unsafe.Pointer(p)), 0, n, uintptr(unsafe.Pointer(bytePointer(b))))
 	if ok == 0 {
 		return "unavailable"
 	}
 	root, _ := syscall.UTF16PtrFromString("\\")
 	var value unsafe.Pointer
 	var length uint32
-	ok, _, _ = query.Call(bytePointer(b), uintptr(unsafe.Pointer(root)), uintptr(unsafe.Pointer(&value)), uintptr(unsafe.Pointer(&length)))
+	ok, _, _ = query.Call(uintptr(unsafe.Pointer(bytePointer(b))), uintptr(unsafe.Pointer(root)), uintptr(unsafe.Pointer(&value)), uintptr(unsafe.Pointer(&length)))
 	if ok == 0 || length < 16 || value == nil {
 		return "unavailable"
 	}

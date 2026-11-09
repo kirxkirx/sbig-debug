@@ -1,8 +1,10 @@
 package sbig
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
 	"reflect"
@@ -62,11 +64,13 @@ func TestWindowsCCDInfoPacking(t *testing.T) {
 
 func TestCaptureLifecycleAndGeometry(t *testing.T) {
 	row := 0
+	started := false
 	m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
 		switch id {
 		case 11:
 			fillCCDInfo(r)
 		case 50:
+			started = true
 			want := []byte{0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 4, 0, 0, 0}
 			if !reflect.DeepEqual(p, want) {
 				t.Fatalf("StartExposure2 packed parameters %x != %x", p, want)
@@ -75,7 +79,9 @@ func TestCaptureLifecycleAndGeometry(t *testing.T) {
 			if !reflect.DeepEqual(p, []byte{50, 0}) {
 				t.Fatalf("polling wrong command %x", p)
 			}
-			r[0] = 3
+			if started {
+				r[0] = 3
+			}
 		case 2, 25:
 			if !reflect.DeepEqual(p, []byte{0, 0}) {
 				t.Fatal("CCD flags must be zero")
@@ -105,7 +111,7 @@ func TestCaptureLifecycleAndGeometry(t *testing.T) {
 	if !reflect.DeepEqual(pixels, []uint16{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
 		t.Fatal(pixels)
 	}
-	if !reflect.DeepEqual(m.calls, []uint16{11, 50, 12, 2, 35, 3, 3, 3, 25}) {
+	if !reflect.DeepEqual(m.calls, []uint16{11, 12, 50, 12, 2, 35, 3, 3, 3, 25}) {
 		t.Fatal(m.calls)
 	}
 }
@@ -113,15 +119,20 @@ func TestCaptureLifecycleAndGeometry(t *testing.T) {
 func TestCaptureFailuresCleanUpAndDiscardIncompleteImage(t *testing.T) {
 	for _, failed := range []uint16{12, 2, 35, 3, 25} {
 		t.Run(commandNames[failed], func(t *testing.T) {
+			started := false
 			m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
-				if id == failed {
+				if id == failed && started {
 					return 8
 				}
 				switch id {
+				case 50:
+					started = true
 				case 11:
 					fillCCDInfo(r)
 				case 12:
-					r[0] = 3
+					if started {
+						r[0] = 3
+					}
 				case 36:
 					copy(r, "synthetic failure")
 				}
@@ -145,13 +156,18 @@ func TestCaptureFailuresCleanUpAndDiscardIncompleteImage(t *testing.T) {
 func TestCaptureCancellationEndsExposureAndReadout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	started := false
 	m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
 		switch id {
+		case 50:
+			started = true
 		case 11:
 			fillCCDInfo(r)
 		case 12:
-			r[0] = 2
-			cancel()
+			if started {
+				r[0] = 2
+				cancel()
+			}
 		}
 		return 0
 	}}
@@ -258,5 +274,74 @@ func TestDevicePacking(t *testing.T) {
 	}
 	if _, e = deviceParams("ethernet", "somehost"); e == nil {
 		t.Fatal("hostname accepted without explicit IPv4")
+	}
+}
+
+func TestRepeatedCapturesWithLatchedCompleteStatus(t *testing.T) {
+	starts := 0
+	m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
+		switch id {
+		case 11:
+			fillCCDInfo(r)
+		case 12:
+			// Complete remains latched through EndExposure and EndReadout.
+			r[0] = 3
+		case 50:
+			starts++
+		}
+		return 0
+	}}
+	c := &Camera{t: m}
+	for i := 0; i < 2; i++ {
+		if pixels, err := c.Capture(context.Background(), Mode{0, 4, 3, ""}, 0.01); err != nil || len(pixels) != 12 {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+	}
+	if starts != 2 {
+		t.Fatal("second exposure was not started")
+	}
+}
+
+func TestActiveExposureIsNotInterrupted(t *testing.T) {
+	for _, state := range []byte{1, 2} {
+		m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
+			switch id {
+			case 11:
+				fillCCDInfo(r)
+			case 12:
+				r[0] = state
+			default:
+				t.Fatalf("mutated active exposure: command %d", id)
+			}
+			return 0
+		}}
+		c := &Camera{t: m}
+		if _, err := c.Capture(context.Background(), Mode{0, 4, 3, ""}, 0.01); err == nil {
+			t.Fatal("accepted active exposure")
+		}
+	}
+}
+
+func TestTraceIsJSONAndWrittenBeforeNativeCall(t *testing.T) {
+	var log bytes.Buffer
+	m := &mockTransport{fn: func(id uint16, p, r []byte) int16 {
+		if !strings.Contains(log.String(), "begin CC_GET_DRIVER_CONTROL") {
+			t.Fatal("no trace before the potentially blocking call")
+		}
+		return 0
+	}}
+	c := &Camera{t: m, trace: &log}
+	if _, err := c.GetControl(8); err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(log.Bytes()), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatal("expected call start and result")
+	}
+	for _, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil || record["utc"] == nil || record["event"] == nil {
+			t.Fatalf("invalid trace line: %s (%v)", line, err)
+		}
 	}
 }

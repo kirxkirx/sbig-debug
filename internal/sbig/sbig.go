@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -150,7 +151,10 @@ func deviceParams(device, ipText string) ([]byte, error) {
 
 func (c *Camera) log(format string, args ...any) {
 	if c.trace != nil {
-		_, _ = fmt.Fprintf(c.trace, time.Now().UTC().Format(time.RFC3339Nano)+" "+format+"\n", args...)
+		_ = json.NewEncoder(c.trace).Encode(map[string]any{"utc": time.Now().UTC().Format(time.RFC3339Nano), "event": fmt.Sprintf(format, args...)})
+		if flush, ok := c.trace.(interface{ Flush() error }); ok {
+			_ = flush.Flush()
+		}
 	}
 }
 func (c *Camera) command(id uint16, p, r []byte) error { return c.call(id, p, r, true) }
@@ -159,6 +163,9 @@ func (c *Camera) call(id uint16, p, r []byte, verbose bool) error {
 		return errors.New("camera is closed")
 	}
 	start := time.Now()
+	if verbose {
+		c.log("begin %s (%d) params=%x", commandNames[id], id, p)
+	}
 	code := c.t.call(id, p, r)
 	if verbose || code != 0 {
 		c.log("%s (%d) rc=%d elapsed_ms=%.3f params=%x", commandNames[id], id, code, float64(time.Since(start).Microseconds())/1000, p)
@@ -373,8 +380,20 @@ func (c *Camera) Capture(ctx context.Context, mode Mode, seconds float64) (pixel
 	if !valid {
 		return nil, errors.New("requested readout mode or dimensions are not reported by this camera")
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(seconds*float64(time.Second))+180*time.Second)
-	defer cancel()
+	statusBefore := make([]byte, 2)
+	if err = c.command(12, word(50), statusBefore); err != nil {
+		return nil, err
+	}
+	// A completed status can remain latched after a previous readout. Only the
+	// two in-progress states establish that another integration is still active.
+	if state := u16(statusBefore, 0) & 3; state == 1 || state == 2 {
+		return nil, fmt.Errorf("imaging CCD exposure is still in progress (status %d); refusing to start another exposure", state)
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(seconds*float64(time.Second))+180*time.Second)
+		defer cancel()
+	}
 	ticks := uint32(math.Round(seconds * 100))
 	p := make([]byte, 24)
 	put32(p, 4, ticks)
@@ -448,6 +467,9 @@ func (c *Camera) Capture(ctx context.Context, mode Mode, seconds float64) (pixel
 			return nil, err
 		}
 		start := time.Now()
+		if y%64 == 0 {
+			c.log("readout_progress next_zero_based_row=%d", y)
+		}
 		if err = c.call(3, lp, line, y == 0 || y == int(mode.Height)-1); err != nil {
 			return nil, fmt.Errorf("readout failed at zero-based row %d: %w", y, err)
 		}

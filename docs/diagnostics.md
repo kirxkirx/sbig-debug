@@ -39,6 +39,14 @@ especially relevant. Reconnection or a setting transition can itself affect stat
 
 ## Documented driver parameters
 
+The implementation's command numbers and Windows memory layouts were checked
+against the manufacturer's [Windows SDK](https://diffractionlimited.com/downloads/sbig/WinDevKit.zip)
+(`sbigudrv.h`, dated April 17, 2019), linked by vendor staff in the
+[SDK support thread](https://forum.diffractionlimited.com/threads/access-to-the-sbig-software-developer-kit.169/).
+That header uses eight-byte packing, 16-bit request/enum fields, 32-bit Windows
+longs, and 20 readout-mode entries. Linux SDK native-long sizes must not be used
+to infer the Windows x64 layout. The proprietary SDK and DLL are not redistributed.
+
 The manufacturer's [SBIG Universal Driver application note, version 4.75 Build 9](https://supernovae.in2p3.fr/~llg/DICE/StarDICE/sbig/LinuxDevKit/doc/SBIGUDrv.pdf)
 is an older primary document preserved by a research institution. Sections 3.5.13
 and 3.5.14 describe the controls. The running DLL remains authoritative about
