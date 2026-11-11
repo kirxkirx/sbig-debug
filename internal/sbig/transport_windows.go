@@ -63,6 +63,9 @@ func loadTransport(requested string) (transport, error) {
 			return nil, e
 		}
 		candidates = []string{filepath.Join(filepath.Dir(exe), "sbigudrv.dll"), filepath.Join(system, "sbigudrv.dll")}
+		if win, e := windowsDirectory(); e == nil {
+			candidates = append(candidates, filepath.Join(win, "System", "sbigudrv.dll"))
+		}
 	}
 	var attempts []error
 	for _, path := range candidates {

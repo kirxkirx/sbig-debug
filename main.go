@@ -25,6 +25,7 @@ var version = "dev"
 
 type config struct {
 	out, dll, device, ip, action, test, exposures, modes string
+	files                                                []string
 	count                                                int
 	timeout                                              time.Duration
 	demo, noPause, showVersion                           bool
@@ -47,6 +48,7 @@ type report struct {
 type configView struct {
 	Device, IP, DLL, Test, Exposures, Modes string
 	Count                                   int
+	Files                                   []string `json:"files,omitempty"`
 }
 type snapshot struct {
 	Label  string         `json:"label"`
@@ -68,7 +70,7 @@ func entry() int {
 	fs.StringVar(&c.dll, "dll", "", "explicit full path to matching-bitness SBIGUDrv.dll")
 	fs.StringVar(&c.device, "device", "usb", "usb auto-detect, usb1..usb24, or ethernet")
 	fs.StringVar(&c.ip, "ip", "", "camera IPv4 address for --device ethernet")
-	fs.StringVar(&c.action, "action", "info", "info, baseline, or compare")
+	fs.StringVar(&c.action, "action", "info", "info, drivers, baseline, compare, or analyze (followed by FITS paths)")
 	fs.StringVar(&c.test, "test", "vdd", "compare: vdd, throughput, conservative, or all")
 	fs.StringVar(&c.exposures, "exposures", "0.01,5", "comma-separated dark exposure times in seconds, centisecond resolution")
 	fs.StringVar(&c.modes, "modes", "0", "comma-separated SDK readout mode IDs (0=1x1, 1=2x2, 2=3x3 when supported)")
@@ -83,9 +85,13 @@ func entry() int {
 		}
 		return 2
 	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "Unexpected positional arguments:", fs.Args())
-		return 2
+	c.files = fs.Args()
+	if len(c.files) > 0 {
+		explicitAction := false
+		fs.Visit(func(f *flag.Flag) { explicitAction = explicitAction || f.Name == "action" })
+		if !explicitAction {
+			c.action = "analyze" // Also supports dropping FITS files onto the executable.
+		}
 	}
 	if c.showVersion {
 		fmt.Printf("SBIG Debug %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
@@ -102,8 +108,11 @@ func entry() int {
 		fmt.Println("5  Compare both settings OFF, with baseline before and after")
 		fmt.Println("6  Repeated dark frames at 1x1, 2x2 and 3x3 (supported modes)")
 		fmt.Println("7  Demo report, no camera")
+		fmt.Println("8  Inventory installed driver DLLs, no camera connection")
+		fmt.Println("9  Analyze an existing FITS image, no camera connection")
 		fmt.Print("Choose [1]: ")
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		input := bufio.NewReader(os.Stdin)
+		line, _ := input.ReadString('\n')
 		switch strings.TrimSpace(line) {
 		case "", "1":
 		case "2":
@@ -121,13 +130,20 @@ func entry() int {
 			c.modes = "0,1,2"
 		case "7":
 			c.demo = true
+		case "8":
+			c.action = "drivers"
+		case "9":
+			c.action = "analyze"
+			fmt.Print("FITS file path: ")
+			path, _ := input.ReadString('\n')
+			c.files = []string{strings.Trim(strings.TrimSpace(path), "\"")}
 		default:
 			fmt.Println("Unknown choice")
 			return 2
 		}
 	}
 	code := run(c)
-	if interactive && !c.noPause {
+	if !c.noPause && terminalInput() && (interactive || len(c.files) > 0) {
 		fmt.Print("Press Enter to close. ")
 		bufio.NewReader(os.Stdin).ReadString('\n')
 	}
@@ -140,8 +156,22 @@ func terminalInput() bool {
 }
 
 func validate(c config) ([]float64, []uint16, error) {
-	if c.action != "info" && c.action != "baseline" && c.action != "compare" {
+	if c.action != "info" && c.action != "drivers" && c.action != "baseline" && c.action != "compare" && c.action != "analyze" {
 		return nil, nil, fmt.Errorf("invalid --action %q", c.action)
+	}
+	if c.action == "analyze" {
+		if c.demo || len(c.files) < 1 || len(c.files) > 100 {
+			return nil, nil, errors.New("analyze requires 1..100 FITS paths and cannot be combined with --demo")
+		}
+		for _, path := range c.files {
+			if strings.TrimSpace(path) == "" {
+				return nil, nil, errors.New("empty FITS path")
+			}
+		}
+		return nil, nil, nil
+	}
+	if len(c.files) != 0 {
+		return nil, nil, errors.New("FITS paths require --action analyze")
 	}
 	if c.test != "vdd" && c.test != "throughput" && c.test != "conservative" && c.test != "all" {
 		return nil, nil, fmt.Errorf("invalid --test %q", c.test)
@@ -207,22 +237,32 @@ func run(c config) int {
 		return 1
 	}
 	defer logFile.Close()
-	log := io.MultiWriter(os.Stdout, logFile)
+	log := &lockedWriter{dst: io.MultiWriter(os.Stdout, logFile)}
+	finishCrashLog := captureCrashes(c.out, log)
+	defer finishCrashLog()
 	trace, err := os.Create(filepath.Join(c.out, "driver-calls.jsonl"))
 	if err != nil {
 		fmt.Fprintln(log, err)
 		return 1
 	}
 	defer trace.Close()
-	r := report{Version: version, Started: time.Now().UTC().Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Demo: c.demo, Action: c.action, Settings: configView{Device: c.device, IP: c.ip, DLL: c.dll, Test: c.test, Exposures: c.exposures, Modes: c.modes, Count: c.count}}
+	r := report{Version: version, Started: time.Now().UTC().Format(time.RFC3339Nano), OS: runtime.GOOS, Arch: runtime.GOARCH, Demo: c.demo, Action: c.action, Settings: configView{Device: c.device, IP: c.ip, DLL: c.dll, Test: c.test, Exposures: c.exposures, Modes: c.modes, Count: c.count, Files: c.files}}
 	fmt.Fprintf(log, "SBIG Debug %s | %s/%s\nOutput: %s\n", version, runtime.GOOS, runtime.GOARCH, c.out)
 	fmt.Fprintln(log, "Reports remain on this computer. No automatic upload. No firmware or driver installation.")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if c.demo {
+	if c.action == "analyze" {
+		err = analyzeFiles(ctx, c, &r, log)
+	} else if c.demo {
 		err = demo(c.out, &r, log)
 	} else {
-		err = hardware(ctx, c, exposures, modeIDs, &r, log, trace)
+		inventory := sbig.Inventory(c.dll)
+		r.Snapshots = append(r.Snapshots, snapshot{Label: "installed-driver-dlls", Time: time.Now().UTC().Format(time.RFC3339Nano), Values: map[string]any{"dll_inventory": inventory}})
+		data, _ := json.MarshalIndent(inventory, "", "  ")
+		fmt.Fprintln(log, "Driver DLL inventory:", string(data))
+		if c.action != "drivers" {
+			err = hardware(ctx, c, exposures, modeIDs, &r, log, trace)
+		}
 	}
 	if err != nil {
 		r.Errors = append(r.Errors, err.Error())
@@ -251,8 +291,24 @@ type camera interface {
 }
 
 func hardware(ctx context.Context, c config, exposures []float64, ids []uint16, r *report, log, trace io.Writer) (err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if runtime.GOOS == "windows" && c.action != "info" {
+		release, e := preventIdleSleep()
+		if e != nil {
+			note := "Could not prevent automatic Windows sleep during acquisition: " + e.Error()
+			r.Notes = append(r.Notes, note)
+			fmt.Fprintln(log, note)
+		} else {
+			defer func() { err = errors.Join(err, release()) }()
+			fmt.Fprintln(log, "Automatic Windows idle sleep is inhibited during acquisition.")
+		}
+	}
 	fmt.Fprintln(log, "Close other camera clients. Cooler settings are left as found; all acquisitions use the closed shutter.")
-	cam, err := sbig.Open(sbig.Options{DLL: c.dll, Device: c.device, IP: c.ip, Trace: trace})
+	monitor := &sbig.Monitor{}
+	stopWatch := watchNativeCalls(monitor, log, 5*time.Second, 60*time.Second)
+	defer stopWatch()
+	cam, err := sbig.Open(sbig.Options{DLL: c.dll, Device: c.device, IP: c.ip, Trace: trace, Monitor: monitor})
 	if err != nil {
 		return err
 	}
@@ -413,10 +469,30 @@ func runProfile(ctx context.Context, cam camera, c config, p profile, modes []sb
 				captureElapsed := time.Since(started).Seconds()
 				after := cam.Snapshot()
 				if e != nil {
+					if measured, ok := cam.(interface{ LastCapture() sbig.CaptureTelemetry }); ok {
+						timing := measured.LastCapture()
+						after["failed_capture_timing"] = timing
+						name := stem + "_line_timing.csv"
+						if timingErr := saveLineTimings(filepath.Join(c.out, name), timing.LineMilliseconds); timingErr != nil {
+							e = errors.Join(e, timingErr)
+						} else {
+							after["line_timing_csv"] = name
+						}
+					}
 					r.Snapshots = append(r.Snapshots, snapshot{Label: stem + "-failed", Time: time.Now().UTC().Format(time.RFC3339Nano), Values: after})
 					return fmt.Errorf("%s: %w", stem, e)
 				}
 				meta := map[string]any{"profile": p.name, "mode": m.ID, "exposure_seconds": secs, "EXPTIME": secs, "IMAGETYP": "Dark Frame", "DATE-OBS": started.UTC().Format(time.RFC3339Nano), "capture_elapsed_seconds": captureElapsed, "before": before, "after": after, "version": version, "software": "SBIG Debug " + version}
+				meta["link_counter_change"] = linkCounterChange(before, after)
+				if measured, ok := cam.(interface{ LastCapture() sbig.CaptureTelemetry }); ok {
+					timing := measured.LastCapture()
+					meta["capture_timing"] = timing
+					name := stem + "_line_timing.csv"
+					if e = saveLineTimings(filepath.Join(c.out, name), timing.LineMilliseconds); e != nil {
+						return fmt.Errorf("saving %s: %w", name, e)
+					}
+					meta["line_timing_csv"] = name
+				}
 				if m.ID <= 2 {
 					meta["binning"] = int(m.ID) + 1
 				}

@@ -96,11 +96,11 @@ func SaveFrame(dir, stem string, pixels []uint16, width, height int, metadata ma
 
 func writeProfiles(dst io.Writer, profiles []Profile) error {
 	w := csv.NewWriter(dst)
-	if err := w.Write([]string{"index_zero_based", "min_adu", "max_adu", "mean_adu", "stddev_adu", "zero_fraction", "saturated_65535_fraction", "near_saturated_ge65000_fraction"}); err != nil {
+	if err := w.Write([]string{"index_zero_based", "min_adu", "max_adu", "mean_adu", "median_adu", "stddev_adu", "zero_fraction", "saturated_65535_fraction", "near_saturated_ge65000_fraction"}); err != nil {
 		return err
 	}
 	for _, p := range profiles {
-		if err := w.Write([]string{strconv.Itoa(p.Index), strconv.Itoa(int(p.Min)), strconv.Itoa(int(p.Max)), f64(p.Mean), f64(p.StdDev), f64(p.ZeroFraction), f64(p.SaturatedFraction), f64(p.NearSaturatedFraction)}); err != nil {
+		if err := w.Write([]string{strconv.Itoa(p.Index), strconv.Itoa(int(p.Min)), strconv.Itoa(int(p.Max)), f64(p.Mean), f64(p.Median), f64(p.StdDev), f64(p.ZeroFraction), f64(p.SaturatedFraction), f64(p.NearSaturatedFraction)}); err != nil {
 			return err
 		}
 	}

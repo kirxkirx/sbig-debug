@@ -48,7 +48,7 @@ func TestWindowsCCDInfoPacking(t *testing.T) {
 		fillCCDInfo(r)
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	info, modes, err := c.ccdInfo(0)
 	if err != nil || len(modes) != 1 || modes[0] != (Mode{0, 4, 3, "1x1"}) {
 		t.Fatalf("decode: %v %v", modes, err)
@@ -103,7 +103,7 @@ func TestCaptureLifecycleAndGeometry(t *testing.T) {
 		}
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	pixels, err := c.Capture(context.Background(), Mode{0, 4, 3, "1x1"}, 0.01)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +138,7 @@ func TestCaptureFailuresCleanUpAndDiscardIncompleteImage(t *testing.T) {
 				}
 				return 0
 			}}
-			c := &Camera{t: m}
+			c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 			pixels, err := c.Capture(context.Background(), Mode{0, 4, 3, ""}, 0.01)
 			if err == nil || pixels != nil {
 				t.Fatalf("incomplete capture published: %v %v", pixels, err)
@@ -171,7 +171,7 @@ func TestCaptureCancellationEndsExposureAndReadout(t *testing.T) {
 		}
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	pixels, err := c.Capture(ctx, Mode{0, 4, 3, ""}, 0.01)
 	if !errors.Is(err, context.Canceled) || pixels != nil {
 		t.Fatalf("%v %v", pixels, err)
@@ -190,7 +190,7 @@ func TestCaptureRejectsInvalidInputsBeforeCameraMutation(t *testing.T) {
 		t.Fatalf("unexpected camera mutation %d", id)
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	for _, seconds := range []float64{0, math.NaN(), math.Inf(1), -1, 3601} {
 		if _, e := c.Capture(context.Background(), Mode{0, 4, 3, ""}, seconds); e == nil {
 			t.Fatalf("accepted %v", seconds)
@@ -217,7 +217,7 @@ func TestControlPackingAndWriteRestrictions(t *testing.T) {
 		}
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	if e := c.SetControl(8, 1); e != nil {
 		t.Fatal(e)
 	}
@@ -254,7 +254,7 @@ func TestTemperatureFallbackDoesNotInventLaterFields(t *testing.T) {
 		binary.LittleEndian.PutUint64(r[16:], math.Float64bits(-19.5))
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	got := c.temperature()
 	if got["imaging_ccd_c"] != -19.5 || got["cooling_frozen"] != true {
 		t.Fatal(got)
@@ -291,7 +291,7 @@ func TestRepeatedCapturesWithLatchedCompleteStatus(t *testing.T) {
 		}
 		return 0
 	}}
-	c := &Camera{t: m}
+	c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 	for i := 0; i < 2; i++ {
 		if pixels, err := c.Capture(context.Background(), Mode{0, 4, 3, ""}, 0.01); err != nil || len(pixels) != 12 {
 			t.Fatalf("frame %d: %v", i, err)
@@ -315,7 +315,7 @@ func TestActiveExposureIsNotInterrupted(t *testing.T) {
 			}
 			return 0
 		}}
-		c := &Camera{t: m}
+		c := &Camera{t: m, status2Unsupported: "legacy-status test"}
 		if _, err := c.Capture(context.Background(), Mode{0, 4, 3, ""}, 0.01); err == nil {
 			t.Fatal("accepted active exposure")
 		}
@@ -330,7 +330,7 @@ func TestTraceIsJSONAndWrittenBeforeNativeCall(t *testing.T) {
 		}
 		return 0
 	}}
-	c := &Camera{t: m, trace: &log}
+	c := &Camera{t: m, trace: &log, status2Unsupported: "legacy-status test"}
 	if _, err := c.GetControl(8); err != nil {
 		t.Fatal(err)
 	}

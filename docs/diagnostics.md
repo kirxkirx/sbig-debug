@@ -107,6 +107,39 @@ stale buffer. Output files are created exclusively to avoid overwriting earlier
 evidence. A failed save can leave partial files, which must not be interpreted as
 a successful complete frame.
 
+## Additional observations
+
+Row and column medians accompany the means, and the five largest adjacent
+row-median changes are listed with their signs and positions. Bit occupancy counts
+all pixels with a given bit set; it does not prove that an ADC bit is stuck.
+Left/right and even/odd summaries also depend on the scene, illumination, and
+readout geometry. Empty regions in very narrow images have count zero and should
+not be interpreted as zero-ADU measurements.
+
+Readout timing CSVs contain the elapsed time inside each completed native line
+call, excluding trace writes. Overall readout duration also includes copying and
+logging. A failed frame retains timing for completed rows in its failure snapshot.
+Link-counter deltas include the surrounding telemetry requests; decreasing
+counters are labelled unavailable because reset and wrap cannot be distinguished.
+
+The optional extended command-status query records sampled phase transitions
+about every 100 ms. Short phases may be missed, and pre-exposure can include
+shutter movement or preflash. The raw status/info words are retained. Unsupported
+commands fall back to the original status query; communication failures stop the
+capture and initiate cleanup.
+
+Offline FITS analysis uses the same statistics and does not normalize pixel values.
+Its bounded reader accepts raw integer ADU data and retains the complete input
+file alongside the generated pixel FITS. See the README for supported formats and
+limits. No camera state can be inferred from an offline run beyond the source
+image's recorded metadata.
+
+Windows idle-sleep prevention uses the thread-specific
+[SetThreadExecutionState API](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate)
+on the locked camera thread and restores its previous requirements. It cannot
+prevent a deliberate suspend or loss of power. The observational watchdog also
+cannot safely terminate a blocked vendor DLL call.
+
 ## Limits of power and Windows diagnostics
 
 The [STXL operating manual](https://diffractionlimited.com/wp-content/uploads/2016/12/stxl_manual.pdf)

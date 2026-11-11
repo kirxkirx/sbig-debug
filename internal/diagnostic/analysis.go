@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math"
+	"math/bits"
+	"sort"
 )
 
 const NearSaturationADU = 65000
@@ -15,7 +17,7 @@ const NearSaturationADU = 65000
 type Profile struct {
 	Index                                                  int
 	Min, Max                                               uint16
-	Mean, StdDev                                           float64
+	Mean, Median, StdDev                                   float64
 	ZeroFraction, SaturatedFraction, NearSaturatedFraction float64
 }
 
@@ -42,11 +44,34 @@ type Stats struct {
 	StrongestColumnJump   float64       `json:"strongest_column_mean_jump_adu"`
 	BoundaryColumn        int           `json:"boundary_column_zero_based"`
 	IdenticalAdjacentRows int           `json:"identical_adjacent_rows"`
+	BitSetFraction        [16]float64   `json:"bit_set_fraction_lsb_first"`
+	LeftHalf              RegionStats   `json:"left_half"`
+	RightHalf             RegionStats   `json:"right_half"`
+	EvenColumns           RegionStats   `json:"even_zero_based_columns"`
+	OddColumns            RegionStats   `json:"odd_zero_based_columns"`
+	RowMedianBoundaries   []Boundary    `json:"strongest_row_median_boundaries"`
 	SHA256                string        `json:"unsigned_big_endian_pixel_sha256"`
 	Warnings              []string      `json:"observations,omitempty"`
 	Rows                  []Profile     `json:"-"`
 	Columns               []Profile     `json:"-"`
 	Histogram             [65536]uint64 `json:"-"`
+}
+
+// RegionStats is descriptive. Count=0 marks an absent region (for example the
+// left half of a one-column image); its zero summary values are not measurements.
+type RegionStats struct {
+	Count  int     `json:"count"`
+	Mean   float64 `json:"mean_adu"`
+	Median float64 `json:"median_adu"`
+}
+
+// Boundary is the adjacent row pair with its second row's zero-based index.
+// The five largest nonzero changes are reported without a fault threshold.
+type Boundary struct {
+	Row    int     `json:"row_zero_based"`
+	Before float64 `json:"median_before_adu"`
+	After  float64 `json:"median_after_adu"`
+	Delta  float64 `json:"signed_change_adu"`
 }
 
 type accumulator struct {
@@ -101,6 +126,10 @@ func Analyze(pixels []uint16, width, height int) Stats {
 	s.Rows = make([]Profile, height)
 	s.Columns = make([]Profile, width)
 	columns := make([]accumulator, width)
+	var regions [4]accumulator
+	regionHist := new([4][65536]uint64)
+	var bitCounts [16]uint64
+	lineHistogram := new(medianHistogram)
 	var total accumulator
 	hash := sha256.New()
 	buf := make([]byte, width*2)
@@ -109,6 +138,19 @@ func Analyze(pixels []uint16, width, height int) Stats {
 		identical := y > 0
 		for x := 0; x < width; x++ {
 			v := pixels[y*width+x]
+			lineHistogram.add(v)
+			half := 0
+			if x >= width/2 {
+				half = 1
+			}
+			regions[half].add(v)
+			regionHist[half][v]++
+			parity := 2 + x%2
+			regions[parity].add(v)
+			regionHist[parity][v]++
+			for remaining := v; remaining != 0; remaining &= remaining - 1 {
+				bitCounts[bits.TrailingZeros16(remaining)]++
+			}
 			row.add(v)
 			columns[x].add(v)
 			total.add(v)
@@ -123,6 +165,8 @@ func Analyze(pixels []uint16, width, height int) Stats {
 			s.IdenticalAdjacentRows++
 		}
 		s.Rows[y] = row.profile(y)
+		s.Rows[y].Median = lineHistogram.median(width)
+		lineHistogram.reset()
 		if y > 0 {
 			jump := math.Abs(s.Rows[y].Mean - s.Rows[y-1].Mean)
 			if jump > s.StrongestRowJump {
@@ -132,12 +176,43 @@ func Analyze(pixels []uint16, width, height int) Stats {
 	}
 	for x, a := range columns {
 		s.Columns[x] = a.profile(x)
+		for y := 0; y < height; y++ {
+			lineHistogram.add(pixels[y*width+x])
+		}
+		s.Columns[x].Median = lineHistogram.median(height)
+		lineHistogram.reset()
 		if x > 0 {
 			jump := math.Abs(s.Columns[x].Mean - s.Columns[x-1].Mean)
 			if jump > s.StrongestColumnJump {
 				s.StrongestColumnJump, s.BoundaryColumn = jump, x
 			}
 		}
+	}
+	for i, count := range bitCounts {
+		s.BitSetFraction[i] = float64(count) / float64(s.Count)
+	}
+	regionResults := []*RegionStats{&s.LeftHalf, &s.RightHalf, &s.EvenColumns, &s.OddColumns}
+	for i, result := range regionResults {
+		result.Count, result.Mean = regions[i].n, regions[i].mean
+		if result.Count > 0 {
+			result.Median = quantile(&regionHist[i], result.Count, 0.5)
+		}
+	}
+	for y := 1; y < height; y++ {
+		before, after := s.Rows[y-1].Median, s.Rows[y].Median
+		if before != after {
+			s.RowMedianBoundaries = append(s.RowMedianBoundaries, Boundary{Row: y, Before: before, After: after, Delta: after - before})
+		}
+	}
+	sort.Slice(s.RowMedianBoundaries, func(i, j int) bool {
+		a, b := s.RowMedianBoundaries[i], s.RowMedianBoundaries[j]
+		if math.Abs(a.Delta) == math.Abs(b.Delta) {
+			return a.Row < b.Row
+		}
+		return math.Abs(a.Delta) > math.Abs(b.Delta)
+	})
+	if len(s.RowMedianBoundaries) > 5 {
+		s.RowMedianBoundaries = s.RowMedianBoundaries[:5]
 	}
 	s.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	p := total.profile(0)
@@ -171,6 +246,52 @@ func Analyze(pixels []uint16, width, height int) Stats {
 		s.Warnings = append(s.Warnings, "Some adjacent rows are exactly identical; saturation or a uniform field can also cause this.")
 	}
 	return s
+}
+
+// A two-level histogram finds each line's median by inspecting at most 512
+// counters per rank, without sorting pixels or scanning 65536 bins per line.
+// Reset visits only the values present in the preceding line.
+type medianHistogram struct {
+	fine    [65536]uint64
+	coarse  [256]uint64
+	touched []uint16
+}
+
+func (h *medianHistogram) add(v uint16) {
+	if h.fine[v] == 0 {
+		h.touched = append(h.touched, v)
+	}
+	h.fine[v]++
+	h.coarse[v>>8]++
+}
+
+func (h *medianHistogram) median(n int) float64 {
+	value := func(rank uint64) float64 {
+		var seen uint64
+		for high, count := range h.coarse {
+			if seen+count <= rank {
+				seen += count
+				continue
+			}
+			for low := 0; low < 256; low++ {
+				v := high*256 + low
+				seen += h.fine[v]
+				if seen > rank {
+					return float64(v)
+				}
+			}
+		}
+		return 0
+	}
+	return (value(uint64((n-1)/2)) + value(uint64(n/2))) / 2
+}
+
+func (h *medianHistogram) reset() {
+	for _, v := range h.touched {
+		h.fine[v] = 0
+	}
+	clear(h.coarse[:])
+	h.touched = h.touched[:0]
 }
 
 func quantile(hist *[65536]uint64, n int, q float64) float64 {

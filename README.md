@@ -52,6 +52,8 @@ The double-click menu offers:
 | 5 | Baseline, both controls set to zero, restored baseline |
 | 6 | The repeated-dark sequence at advertised 1×1, 2×2, and 3×3 modes |
 | 7 | Synthetic demo without a driver |
+| 8 | Inventory installed DLLs without opening a camera |
+| 9 | Analyze an existing FITS image without opening a camera |
 
 Start with **2**, then **3**. A comparison runs six frames per block by default,
 18 frames total. At 4008×2672, FITS alone needs about **367 MiB** for those 18
@@ -82,6 +84,12 @@ Open PowerShell in the extracted folder. Replace `win64` with `win32` as needed.
 ```powershell
 # Read-only diagnostic queries
 .\sbig-debug-win64.exe --action info
+
+# Inspect driver copies without loading the camera DLL or connecting
+.\sbig-debug-win64.exe --action drivers
+
+# Analyze existing images; put flags before the file paths
+.\sbig-debug-win64.exe --action analyze --no-pause 'C:\Images\bad1.fits' 'C:\Images\bad2.fits'
 
 # Baseline: repeated full-frame darks
 .\sbig-debug-win64.exe --action baseline --count 5 --exposures 0.01,5
@@ -125,17 +133,52 @@ deadlines are checked between driver calls; a blocking native DLL call cannot be
 forcibly interrupted safely. The trace identifies the last call entered. Do not
 run multiple copies against one camera. `--help` shows all options.
 
+A watchdog prints the active native call after 60 seconds without a return. It
+only observes call state; it does not issue driver commands. On Windows, acquisition
+temporarily inhibits automatic idle sleep on the camera's locked OS thread and
+restores the previous requirement on exit. Deliberate sleep, closing the laptop
+lid, power loss, and forcibly terminating the program can still interrupt a run.
+
+## Analyze existing images
+
+Choose **9**, drop FITS files onto the executable, or pass them on the command line.
+Positional file paths select offline analysis when `--action` is omitted. Put all
+options before the paths. No camera connection or installed driver is needed.
+
+Each original file is copied unchanged into the new output folder, with its file
+SHA-256 and original path recorded. Statistics, pixel hashes, previews, and CSVs
+use the same analysis as new captures. The separately generated pixel FITS keeps
+the selected plane's physical values and selected metadata; the original input
+copy retains the complete source file. A bad file is reported while later inputs
+are still processed, and any failed input makes the exit status nonzero.
+
+Supported inputs are uncompressed monochrome two-dimensional FITS images with
+`BITPIX` 8, 16, or 32, `BSCALE=1`, integral `BZERO`, and physical integer values
+within 0–65535. The usual unsigned `BITPIX=16, BZERO=32768` convention is supported.
+Floating-point, scaled, undefined, color/cube, and out-of-range data are rejected
+instead of being clipped or normalized. The reader can skip non-image HDUs to
+find an image extension. Limits are 32 million pixels, 65535 pixels per axis,
+512 MiB per input file, and 100 input files. XISF is not currently supported;
+export an uncompressed integer FITS image preserving the original pixel values.
+
 ## Information collected
 
 - Loaded DLL path, file version, SHA-256, process architecture, and Windows version.
+- Inventory of default, legacy Windows System, and common application DLL copies,
+  including PE architecture and whether it matches the process, even when connection fails.
 - Driver/API versions, firmware, camera type/serial, reported CCD capabilities,
   readout modes, dimensions, pixel size and gain.
 - Temperature/cooling/fan telemetry supported by the camera, and link counters.
 - Read-only customer options and driver-control values, including Vdd, throughput,
   FIFO/pipeline, gain, vertical flush, and defect-repair controls.
 - Driver call return codes and timing; exposure/readout cleanup status.
+- Per-line native readout timing and sampled extended exposure phases when supported.
+  Phase observations are approximate and do not establish whether preflash occurred.
 - Per-frame snapshots, exact pixel hash, min/max/mean/median/standard deviation,
   zero and saturation fractions, and row/column discontinuity measurements.
+- Row/column medians, the five largest row-median changes, bit occupancy, and
+  left/right-half and even/odd-column summaries. These describe pixels, not a
+  diagnosed failed component.
 
 Unsupported queries appear as unavailable with the actual driver error; they are
 not interpreted as zeros or camera failure. Some telemetry has model-dependent
@@ -153,11 +196,14 @@ that state and preserves the pixels delivered by the driver without further repa
 | `report.json` | Structured record including before/after snapshots for every completed frame |
 | `console.log` | Human-readable run log |
 | `driver-calls.jsonl` | Driver command trace |
+| `crash.log` | Additional Go fatal-error output; normally empty |
 | `*.fits` | Delivered unsigned 16-bit pixels, standard signed FITS storage with BZERO=32768 |
+| `*_source.fits` | Offline input copied unchanged, including original headers/extensions |
 | `*_fixed.png` | Full 0–65535 mapping, original 16-bit grayscale values |
 | `*_stretch.png` | Labelled display-only contrast stretch |
 | `*_rows.csv`, `*_columns.csv` | Statistics for every row/column, indexed from zero |
 | `*_histogram.csv` | Counts for all 65536 possible ADU values |
+| `*_line_timing.csv` | Native readout-call milliseconds for each completed row, excluding trace writes |
 
 The program writes a report after every successfully saved frame and again at the
 end. Row zero is the first row delivered by the driver; no optical orientation is
@@ -172,7 +218,11 @@ review the folder before posting it publicly.
 ## Driver loading and troubleshooting
 
 The program loads an explicitly selected absolute DLL path, or checks the
-executable's directory and the appropriate Windows system directory. It does not
+executable's directory, the appropriate Windows system directory, and the legacy
+`Windows\System` directory. It inventories common NINA, SBIG, Diffraction Limited,
+and ASCOM installation folders, but application DLLs require explicit `--dll`
+selection. Inventory paths are those visible to the process; a 32-bit process
+may see redirected Windows system directories. It does not
 search an arbitrary current directory or PATH. Select a trusted vendor DLL and
 match the executable's architecture. A compatible user-mode DLL still needs the
 installed low-level device driver. The vendor's
@@ -187,10 +237,13 @@ the cause of a completed saturated exposure. This utility does not bypass it.
 
 ## Building and testing
 
-The source uses Go 1.23 or newer with no third-party Go modules and no C compiler.
+Building the executable uses Go 1.23 or newer with no third-party Go modules and no C compiler.
 Windows calls use explicitly sized byte buffers verified against the manufacturer's
-Windows SDK layouts (Windows `long` stays 32-bit on x64). Linux supports the demo
-and tests; hardware access is Windows-only.
+Windows SDK layouts (Windows `long` stays 32-bit on x64). The additional
+[ABI verification script](tools/abicheck/README.md) uses Clang and a checksum-pinned
+vendor SDK to check the actual packing/decoding layouts for both Windows targets;
+GitHub Actions runs it before release. Linux supports offline FITS analysis, the
+demo, and tests; hardware access is Windows-only.
 
 ```sh
 go test ./...

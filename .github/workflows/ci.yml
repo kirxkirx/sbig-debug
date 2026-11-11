@@ -27,6 +27,8 @@ jobs:
         run: |
           go test ./...
           go vet ./...
+      - name: Check Windows ABI against pinned vendor SDK
+        run: sh tools/abicheck/check.sh
 
   windows:
     name: Windows ${{ matrix.goarch }} tests and executable
@@ -87,6 +89,16 @@ jobs:
           $fits = @(Get-ChildItem $demo -Recurse -Filter '*.fits')
           $reports = @(Get-ChildItem $demo -Recurse -Filter 'report.html')
           if ($fits.Count -eq 0 -or $reports.Count -eq 0) { throw 'Demo did not produce FITS images and report.html' }
+          $offline = Join-Path $env:RUNNER_TEMP 'sbig-debug-offline'
+          & $exe --action analyze --out $offline --no-pause $fits[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Offline FITS analysis failed' }
+          $offlineReport = Get-Content (Join-Path $offline 'report.json') -Raw | ConvertFrom-Json
+          if (@($offlineReport.frames).Count -ne 1) { throw 'Offline report lost its frame' }
+          $source = Join-Path $offline $offlineReport.frames[0].metadata.source_file
+          if ((Get-FileHash $source).Hash -ne (Get-FileHash $fits[0].FullName).Hash) { throw 'Offline input was not preserved byte for byte' }
+          $inventory = Join-Path $env:RUNNER_TEMP 'sbig-debug-inventory'
+          & $exe --action drivers --out $inventory --no-pause
+          if ($LASTEXITCODE -ne 0) { throw 'DLL inventory failed without camera hardware' }
           $missingName = 'SBIG-missing-&-' + [guid]::NewGuid().ToString('N') + '.dll'
           $missingDLL = Join-Path $env:RUNNER_TEMP $missingName
           $failure = Join-Path $env:RUNNER_TEMP ('sbig-debug-failure-' + [guid]::NewGuid().ToString('N'))

@@ -63,7 +63,11 @@ func writeFITS(dst io.Writer, pixels []uint16, width, height int, metadata map[s
 		}
 		cards = append(cards, fitsCard(field.key, value, ""))
 	}
-	cards = append(cards, fmt.Sprintf("%-80s", "COMMENT Pixel order is the driver readout order; no optical orientation assumed."))
+	orderComment := "COMMENT Pixel order is the driver readout order; no optical orientation assumed."
+	if offline, _ := metadata["analysis_only"].(bool); offline {
+		orderComment = "COMMENT Pixel order is the stored input order; no optical orientation assumed."
+	}
+	cards = append(cards, fmt.Sprintf("%-80s", orderComment))
 	cards = append(cards, fmt.Sprintf("%-80s", "END"))
 	header := strings.Join(cards, "")
 	header += strings.Repeat(" ", (2880-len(header)%2880)%2880)
