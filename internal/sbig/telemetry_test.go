@@ -17,6 +17,10 @@ func telemetryTransport(status2Code int16) *mockTransport {
 			r[0] = 3
 		case 61:
 			if status2Code != 0 {
+				// Make the failing poll take measurable time: on Windows two clock
+				// readings microseconds apart can be equal, which made the
+				// "exposure wait recorded" assertion flaky (seen on windows/386 CI).
+				time.Sleep(2 * time.Millisecond)
 				return status2Code
 			}
 			put16(r, 0, 3)
